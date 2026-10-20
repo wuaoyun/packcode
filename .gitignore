@@ -1,0 +1,35 @@
+# Windows executables and build output
+*.exe
+*.exe~
+*.dll
+*.test
+/bin/
+/dist/
+/build/
+
+# Generated archives and task staging files
+*.zip
+.packcode-*.tmp
+.packcode-extract-*/
+/tmp/
+/temp/
+
+# Test coverage, profiling and logs
+coverage*.out
+coverage*.html
+*.prof
+*.pprof
+*.log
+
+# Local configuration and editor/OS files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.swp
+*.swo
