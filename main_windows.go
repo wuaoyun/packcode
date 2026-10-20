@@ -51,15 +51,24 @@ func control(parent uintptr, class, title string, style uintptr, x, y, w, h, id 
 func checked(h uintptr) bool { v, _, _ := sendMessage.Call(h, 0xf0, 0, 0); return v == 1 }
 func main() {
 	src := flag.String("src", "", "源目录（省略则打开窗口）")
-	out := flag.String("out", "", "输出 ZIP 路径")
+	out := flag.String("out", "", "输出压缩包路径，解压时为新建目标目录")
 	store := flag.Bool("store", false, "仅打包，不压缩")
 	exclude := flag.Bool("exclude", true, "排除点开头的文件/目录及常见依赖目录")
-	unpack := flag.Bool("unpack", false, "解压 ZIP，-src 为 ZIP，-out 为新建目标目录")
+	unpack := flag.Bool("unpack", false, "自动识别并解压 ZIP、7z、RAR、tar.gz")
+	format := flag.String("format", "", "打包格式 zip、7z、tar.gz，省略时按输出扩展名识别")
 	workers := flag.Int("workers", 0, "并发任务数（1~32，0 使用默认值）")
+	licenses := flag.Bool("licenses", false, "显示开源依赖许可证")
 	flag.Parse()
+	if *licenses {
+		fmt.Print(thirdPartyNotices)
+		return
+	}
 	if *src != "" {
 		if *out == "" {
 			*out = defaultOutput(*src)
+			if *format != "" {
+				*out = defaultFormatOutput(*src, strings.ToLower(*format))
+			}
 			if *unpack {
 				*out = extractOutput(*src)
 			}
@@ -67,9 +76,9 @@ func main() {
 		var e error
 		runCtx := context.WithValue(context.Background(), workersKey{}, *workers)
 		if *unpack {
-			e = Unpack(runCtx, *src, *out, nil)
+			e = UnpackArchive(runCtx, *src, *out, nil)
 		} else {
-			e = Pack(runCtx, Options{*src, *out, *store, *exclude}, nil)
+			e = PackArchive(runCtx, Options{*src, *out, *store, *exclude}, *format, nil)
 		}
 		if e != nil {
 			fmt.Fprintln(os.Stderr, e)
@@ -87,7 +96,11 @@ func defaultOutput(src string) string {
 
 func extractOutput(src string) string {
 	p, _ := filepath.Abs(src)
-	return strings.TrimSuffix(p, filepath.Ext(p)) + "-解压-" + time.Now().Format("20060102-150405")
+	return stripArchiveExtension(p) + "-解压-" + time.Now().Format("20060102-150405")
+}
+
+func defaultFormatOutput(src, format string) string {
+	return strings.TrimSuffix(defaultOutput(src), ".zip") + "." + format
 }
 
 // The window stays on one OS thread. Worker progress is delivered through a
@@ -109,6 +122,14 @@ func runWindow() {
 	var pauseButton, cleanButton uintptr
 	var unpackBox, sourceLabel, outputLabel uintptr
 	var workersBox uintptr
+	var formatBox uintptr
+	selectedFormat := func() string {
+		n, _, _ := sendMessage.Call(formatBox, 0x147, 0, 0)
+		if n < uintptr(len(packingFormats)) {
+			return packingFormats[n]
+		}
+		return "zip"
+	}
 	enable := func(h uintptr, on bool) {
 		var v uintptr
 		if on {
@@ -146,6 +167,7 @@ func runWindow() {
 						enable(startButton, true)
 						enable(unpackBox, true)
 						enable(workersBox, true)
+						enable(formatBox, !checked(unpackBox))
 						enable(pauseButton, false)
 						enable(cleanButton, false)
 						label(pauseButton, "暂停")
@@ -164,23 +186,33 @@ func runWindow() {
 			}
 		case 0x111:
 			switch w & 0xffff {
+			case 19:
+				if task == nil {
+					label(statusBox, thirdPartyNotices)
+				}
+			case 18:
+				if w>>16 == 1 && !checked(unpackBox) {
+					label(outputBox, stripArchiveExtension(textOf(outputBox))+"."+selectedFormat())
+				}
 			case 15:
 				if checked(unpackBox) {
-					label(sourceLabel, "源 ZIP 文件")
+					label(sourceLabel, "源压缩包文件")
 					label(outputLabel, "解压到新文件夹（已有目录不会覆盖）")
 					label(startButton, "开始解压")
 					enable(storeBox, false)
 					enable(excludeBox, false)
+					enable(formatBox, false)
 					label(outputBox, extractOutput(textOf(sourceBox)))
 				} else {
 					label(sourceLabel, "源代码文件夹")
-					label(outputLabel, "输出 ZIP（已有文件不会覆盖）")
+					label(outputLabel, "输出压缩包（已有文件不会覆盖）")
 					label(startButton, "开始打包")
 					enable(storeBox, true)
 					enable(excludeBox, true)
+					enable(formatBox, true)
 					cwd, _ := os.Getwd()
 					label(sourceBox, cwd)
-					label(outputBox, defaultOutput(cwd))
+					label(outputBox, defaultFormatOutput(cwd, selectedFormat()))
 				}
 			case 13:
 				if task != nil && !cancelling {
@@ -209,7 +241,7 @@ func runWindow() {
 				// Windows' built-in folder dialog avoids requiring an extra UI dependency.
 				script := "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ($d.ShowDialog() -eq 'OK') { [Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Write($d.SelectedPath) }"
 				if checked(unpackBox) {
-					script = "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Filter = 'ZIP (*.zip)|*.zip'; if ($d.ShowDialog() -eq 'OK') { [Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Write($d.FileName) }"
+					script = "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Filter = '压缩包|*.zip;*.7z;*.rar;*.tar.gz;*.tgz|所有文件|*.*'; if ($d.ShowDialog() -eq 'OK') { [Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Write($d.FileName) }"
 				}
 				cmd := exec.Command("powershell.exe", "-NoProfile", "-STA", "-Command", script)
 				cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -217,7 +249,7 @@ func runWindow() {
 				if e == nil && len(b) > 0 {
 					p := strings.TrimPrefix(string(b), "\ufeff")
 					label(sourceBox, p)
-					label(outputBox, defaultOutput(p))
+					label(outputBox, defaultFormatOutput(p, selectedFormat()))
 					if checked(unpackBox) {
 						label(outputBox, extractOutput(p))
 					}
@@ -228,6 +260,7 @@ func runWindow() {
 				}
 				o := Options{textOf(sourceBox), textOf(outputBox), checked(storeBox), checked(excludeBox)}
 				isExtract := checked(unpackBox)
+				format := selectedFormat()
 				if strings.TrimSpace(o.Source) == "" || strings.TrimSpace(o.Output) == "" {
 					label(statusBox, "请填写源路径和输出路径")
 					return 0
@@ -235,6 +268,7 @@ func runWindow() {
 				user32.NewProc("EnableWindow").Call(startButton, 0)
 				enable(unpackBox, false)
 				enable(workersBox, false)
+				enable(formatBox, false)
 				selected, _, _ := sendMessage.Call(workersBox, 0x147, 0, 0)
 				counts := []int{0, 1, 2, 4, 8, 16, 32}
 				count := 0
@@ -264,6 +298,9 @@ func runWindow() {
 						if isExtract {
 							status = fmt.Sprintf("已解压 %d / %d 个文件 · %.1f MB · %.1f 秒", p.Files, p.Total, float64(p.Bytes)/(1<<20), p.Elapsed.Seconds())
 						}
+						if p.Total == 0 && p.Files > 0 {
+							status = fmt.Sprintf("已处理 %d 个文件 · %.1f MB · %.1f 秒", p.Files, float64(p.Bytes)/(1<<20), p.Elapsed.Seconds())
+						}
 						if p.Files == 0 {
 							status = fmt.Sprintf("正在扫描：已检查 %d 个条目 · %.1f 秒", p.Scanned, p.Elapsed.Seconds())
 						}
@@ -274,9 +311,9 @@ func runWindow() {
 					}
 					var e error
 					if isExtract {
-						e = Unpack(runCtx, o.Source, o.Output, report)
+						e = UnpackArchive(runCtx, o.Source, o.Output, report)
 					} else {
-						e = Pack(runCtx, o, report)
+						e = PackArchive(runCtx, o, format, report)
 					}
 					s := fmt.Sprintf("完成：%s\r\n共 %d 个文件，耗时 %.1f 秒；跳过 %d 个链接/特殊文件（未打包链接目标）。", o.Output, final.Files, final.Elapsed.Seconds(), final.Skipped)
 					if isExtract {
@@ -299,12 +336,18 @@ func runWindow() {
 	wc := windowClass{Proc: callback, Background: 6, Name: name}
 	wc.Size = uint32(unsafe.Sizeof(wc))
 	user32.NewProc("RegisterClassExW").Call(uintptr(unsafe.Pointer(&wc)))
-	hwnd, _, _ := createWindow.Call(0, uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(wide("代码极速打包 / 解压 · ZIP"))), 0x10ca0000, 0x80000000, 0x80000000, 740, 430, 0, 0, 0, 0)
+	hwnd, _, _ := createWindow.Call(0, uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(wide("代码极速打包 / 解压"))), 0x10ca0000, 0x80000000, 0x80000000, 740, 430, 0, 0, 0, 0)
 	sourceLabel = control(hwnd, "STATIC", "源代码文件夹", 0, 20, 20, 160, 22, 0)
+	control(hwnd, "STATIC", "打包格式：", 0, 475, 21, 100, 22, 0)
+	formatBox = control(hwnd, "COMBOBOX", "", 3, 575, 17, 125, 160, 18)
+	for _, s := range []string{"ZIP（默认）", "7z", "tar.gz"} {
+		sendMessage.Call(formatBox, 0x143, 0, uintptr(unsafe.Pointer(wide(s))))
+	}
+	sendMessage.Call(formatBox, 0x14e, 0, 0)
 	cwd, _ := os.Getwd()
 	sourceBox = control(hwnd, "EDIT", cwd, 0x00810080, 20, 46, 580, 27, 1)
 	control(hwnd, "BUTTON", "浏览…", 0, 610, 45, 90, 29, 10)
-	outputLabel = control(hwnd, "STATIC", "输出 ZIP（可修改路径；已有文件不会覆盖）", 0, 20, 85, 650, 22, 0)
+	outputLabel = control(hwnd, "STATIC", "输出压缩包（可修改路径；已有文件不会覆盖）", 0, 20, 85, 650, 22, 0)
 	outputBox = control(hwnd, "EDIT", defaultOutput(cwd), 0x00810080, 20, 111, 680, 27, 2)
 	excludeBox = control(hwnd, "BUTTON", "排除 . 开头的文件/目录及常见依赖目录", 3, 20, 151, 475, 25, 3)
 	control(hwnd, "STATIC", "并发：", 0, 510, 155, 65, 22, 0)
@@ -315,15 +358,17 @@ func runWindow() {
 	sendMessage.Call(workersBox, 0x14e, 0, 0)
 	sendMessage.Call(excludeBox, 0xf1, 1, 0)
 	storeBox = control(hwnd, "BUTTON", "极速模式：仅打包，不压缩（文件体积更大）", 3, 20, 182, 440, 25, 4)
-	unpackBox = control(hwnd, "BUTTON", "ZIP 解压模式", 3, 480, 182, 210, 25, 15)
+	unpackBox = control(hwnd, "BUTTON", "解压模式（自动识别）", 3, 480, 182, 210, 25, 15)
 	startButton = control(hwnd, "BUTTON", "开始打包", 0, 20, 223, 130, 34, 11)
 	pauseButton = control(hwnd, "BUTTON", "暂停", 0, 160, 223, 90, 34, 13)
 	cleanButton = control(hwnd, "BUTTON", "取消并清理", 0, 260, 223, 140, 34, 14)
 	enable(pauseButton, false)
 	enable(cleanButton, false)
 	control(hwnd, "BUTTON", "复制信息", 0, 410, 223, 110, 34, 12)
+	control(hwnd, "BUTTON", "开源许可", 0, 540, 223, 160, 34, 19)
 	// Multiline, read-only, scrollable text keeps long error paths accessible.
-	statusBox = control(hwnd, "EDIT", "就绪 · 支持 PHP / Go / 前端代码。链接和特殊文件会跳过并统计。", 0x00800844, 20, 267, 680, 110, 5)
+	statusBox = control(hwnd, "EDIT", "就绪 · 支持 PHP / Go / 前端代码。链接和特殊文件会跳过并统计。", 0x00A00844, 20, 267, 680, 110, 5)
+	sendMessage.Call(statusBox, 0xc5, 1<<20, 0) // EM_SETLIMITTEXT: allow full license/error text.
 	user32.NewProc("SetTimer").Call(hwnd, 1, 100, 0)
 	type point struct{ X, Y int32 }
 	type message struct {

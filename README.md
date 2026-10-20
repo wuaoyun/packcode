@@ -1,10 +1,21 @@
-# 代码快速打包
+# 代码极速打包 / 解压
 
-## ZIP 解压
+| 格式 | 打包 | 解压 |
+| --- | --- | --- |
+| ZIP（默认） | 支持快速压缩、仅打包 | 支持 |
+| 7z | 支持 LZMA2、仅打包 | 支持 |
+| tar.gz | 支持快速 gzip、无压缩 gzip | 支持，含 `.tgz` |
+| RAR | 不支持 | 支持 RAR 4/5，含固实压缩 |
 
-勾选“ZIP 解压模式”，点击“浏览”选择 ZIP，设置一个尚不存在的目标文件夹，再点击“开始解压”。解压包含压缩包内全部普通文件（包括点开头文件），打包排除规则不作用于解压。支持普通 Store / Deflate ZIP、ZIP64 和 UTF-8 文件名；不支持加密 ZIP、RAR、7z。
+打包时在右上角选择格式，输出扩展名自动更新。ZIP 保留原有快速流水线，适合大量源码小文件；7z 和 tar.gz 使用单次流式扫描，复用读写缓冲，支持暂停、继续、取消及本次临时文件清理。它们的处理过程按文件顺序执行，并发选项仅作用于 ZIP。7z 使用独立文件流和 64 KiB LZMA2 字典，优先限制小文件开销；不承诺比 ZIP 快或比标准 7-Zip 的高压缩设置体积更小。
 
-解压默认使用 2 个常驻工作任务，每个任务复用 256 KiB 缓冲，提前创建所需目录。使用只读文件映射按需读取 ZIP，避免逐个小文件触发短磁盘读取；映射不可用时使用最多 16 MiB 的分块缓存。完整校验文件 CRC，全部成功后将本次临时目录改名为目标目录。目标目录已存在时不覆盖。暂停、继续、取消并清理、关闭窗口清理均适用于解压；取消不会删除原 ZIP。
+所有格式直接集成在 exe 中，无需另装 7-Zip。暂不提供密码输入或 RAR 分卷解压。
+
+## 解压
+
+勾选“解压模式（自动识别）”，点击“浏览”选择压缩包，设置一个尚不存在的目标文件夹，再点击“开始解压”。通过文件头识别格式，改过扩展名的文件也能识别。解压包含压缩包内全部普通文件（包括点开头文件），打包排除规则不作用于解压。ZIP 支持普通 Store / Deflate、ZIP64 和 UTF-8 文件名。
+
+ZIP 解压默认使用 2 个常驻工作任务，每个任务复用 256 KiB 缓冲，提前创建所需目录。使用只读文件映射按需读取 ZIP，避免逐个小文件触发短磁盘读取；映射不可用时使用最多 16 MiB 的分块缓存。其他格式顺序流式解码，适应固实压缩及 tar 的连续数据结构。校验已提供的校验和，全部成功后将本次临时目录改名为目标目录。目标目录已存在时不覆盖。暂停、继续、取消并清理、关闭窗口清理均适用于解压；取消不会删除原压缩包。
 
 本轮同机 3000 个小文件、同一份 ZIP 的并发对比：1/2/4/8/16 路分别为 1.32/0.94/0.98/1.15/1.25 秒。因此解压默认改为 2 路。界面可选择并发数量 1、2、4、8、16、32；“默认”表示打包最多 8 路、解压最多 2 路。不同磁盘表现不同，并发更多不保证更快。系统缓存、磁盘和杀毒扫描会影响结果，实际项目耗时以实测为准。
 
@@ -26,9 +37,13 @@
 ```powershell
 .\PackCode-cli.exe -src "E:\my-project" -out "E:\backup\project.zip"
 .\PackCode-cli.exe -src "E:\my-project" -out "E:\backup\project.zip" -store -exclude=false
+.\PackCode-cli.exe -src "E:\my-project" -out "E:\backup\project.7z"
+.\PackCode-cli.exe -src "E:\my-project" -format tar.gz -out "E:\backup\project.tar.gz"
+.\PackCode-cli.exe -unpack -src "E:\backup\project.rar" -out "E:\restored-project"
+.\PackCode-cli.exe -licenses
 ```
 
-构建（Go 1.24+，Windows amd64）：
+构建（Go 1.27.1+，Windows amd64；`go.mod` 声明的工具链可由 Go 自动下载）：
 
 ```powershell
 go build -trimpath -ldflags "-s -w -H=windowsgui" -o PackCode.exe .
@@ -39,3 +54,7 @@ go test ./...
 本轮新旧 CLI 轮换顺序对比同一组 1000 个约 4 KiB 文件，两轮快速压缩旧版为 0.072/0.059 秒，新版为 0.047/0.045 秒。极速打包和预热后的解压差距不明显；首次解压波动很大，不能作为稳定提速依据。扫描阶段显示条目数量，打包阶段显示已完成/总文件数。
 
 可复现测试：`go test -race ./...`；可选 CLI 对比测试需设置 `PACKCODE_COMPARE=1` 和 `PACKCODE_BASELINE`（旧版 CLI 的绝对路径），运行 `go test -run TestPerformanceComparison -v -count=1`。批量小文件基准可用 `PACKCODE_BENCH_FILES` 调整数量。
+
+新增格式覆盖往返一致性、空文件/目录、全空压缩包、点文件排除、取消/暂停恢复、损坏校验和及路径越界测试。Windows 系统自带 `tar.exe` 可用时，还会独立解压本工具创建的 7z/tar.gz，并验证外部生成的 7z、RAR 5 压缩和固实样本。
+
+开源依赖许可证保存在 `THIRD_PARTY_NOTICES.txt`，同时嵌入 exe，可点击“开源许可”或运行 CLI 的 `-licenses` 查看。7z 编码使用 `github.com/go-filesystems/sevenzip`，7z 解码使用 `github.com/bodgit/sevenzip`，RAR 解码使用 `github.com/nwaples/rardecode/v2`；具体版本锁定在 `go.mod` / `go.sum`。

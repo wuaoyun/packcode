@@ -9,6 +9,10 @@
 
 # Generated archives and task staging files
 *.zip
+*.7z
+*.rar
+*.tar.gz
+*.tgz
 .packcode-*.tmp
 .packcode-extract-*/
 /tmp/
